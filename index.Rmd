@@ -1,0 +1,433 @@
+---
+title: "Muslimische Vielfalt auf TikTok"
+subtitle: "Ein Monitoring von Muslim Content Creators"
+author: "Nader Hotait"
+institute: "<a href='mailto:nader.hotait@hu-berlind.de'>Humboldt-Universität zu Berlin (BIM)</a><br><a href='mailto:nhotait@mail.uni-mannheim.de'>Universität Mannheim (CDSS)<br><br>"
+date: "30 Juli, 2023"
+output:
+  xaringan::moon_reader:
+    css: [default, metropolis, metropolis-fonts]
+    lib_dir: libs
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+class: inverse, center, middle
+
+# Was ist so besonders an TikTok?
+
+---
+
+# Nutzung und Demografie
+
+.middle[
+| Indikator                	| Zahlen                                     	|
+|--------------------------	|--------------------------------------------	|
+| **Erstveröffentlichung** 	| 2016 in China (Douyin), 2017 international 	|
+| **Nutzer:innen**         	| > 1 Mrd.                                   	|
+| **Alter**                	| 28% jünger als 18, ca. 60% jünger als 30   	|
+| **Geschlecht**           	| ca. 57% weiblich, ca. 43% männlich         	|
+| **Engagement-Rate**      	| ca. 13-17%                                 	|
+]
+
+--
+
++ Zahlen weichen stark voneinander ab und jeweilige Methodik nicht nachvollziehbar
++ Nach aller Wahrscheinlichkeit besteht die TikTok Demographie aus
+  + vielen,
+  + eher weiblichen,
+  + jungen,
+  + aktiven Nutzer:innen
++ Jünger und aktiver als auf den meisten Social Media Plattformen
+
+--
+
+&#8594; Community Mapping von German Muslim Content Creator<br>
+&#8594; Mixed-Methods Studie von aktuell 53 TikTok Accounts
+
+```{r setup, include=FALSE}
+options(htmltools.dir.version = FALSE, echo = FALSE)
+knitr::opts_chunk$set(fig.width=12, fig.height=7) 
+```
+
+---
+
+class: inverse, center, middle
+
+# Daten
+
+---
+
+# Die Stichprobe
+
++ Videos von männlich gelesenen Accounts länger
++ Videos von weiblich gelesenen Accounts viraler und beliebter
++ Gender Bias?
+
+```{r load_data, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+pacman::p_load(tidyverse, readxl, lubridate, gt, stringr, SnowballC,
+               RColorBrewer, plotly, gridExtra, quanteda, stm,
+               quanteda.textplots, quanteda.textstats, quanteda.textmodels, ggpubr)
+
+source_df <- read_xlsx("all_proof.xlsx") %>%
+  select(`TikTok Account`, source)
+names(source_df) <- c("user", "list")
+
+source_df$list[startsWith(source_df$list, "rad")] <- "rad"
+source_df$list[startsWith(source_df$list, "regular")] <- "regular"
+
+crawled_df <- read_xlsx("crawled_no_duplicates.xlsx")
+
+merged <- left_join(crawled_df, source_df, by = "user")
+
+merged$user_2 <- merged$user
+merged$user_2[merged$user_2=="generation_islamgi"] <- "generation_islam"
+```
+
+```{r by-gender, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+female <- read_excel("accounts.xlsx") %>%
+  select(account, sachthema)
+
+merged <- merged %>%
+  mutate(gender = case_when(
+    user %in% female$account ~ "female",
+    TRUE ~ "male"
+  ))
+
+likes_views <- merged %>%
+  group_by(gender) %>%
+  summarise(accounts = n_distinct(user),
+            videos = length(user),
+            `average videos` = round(length(user)/length(unique(user))),
+            `average duration` = round(as.duration(sum(duration_sec, na.rm =TRUE)/length(user))),
+            views = sum(views),
+            likes = sum(likes_count),
+            `average views` = round(sum(views)/length(user)),
+            `average likes` = round(sum(likes_count)/length(user))) %>%
+  add_row(gender = "all",
+          accounts = n_distinct(merged$user),
+          videos = length(merged$user),
+          `average videos` = round(length(merged$user)/length(unique(merged$user))),
+          `average duration` = round(as.duration(sum(merged$duration_sec, na.rm = TRUE)/length(merged$user))),
+          views = sum(merged$views),
+          likes = sum(merged$likes_count),
+          `average views` = round(sum(merged$views)/length(merged$user)),
+          `average likes` = round(sum(merged$likes_count)/length(merged$user)))
+
+likes_views <- gt(likes_views)
+likes_views <-
+  likes_views %>%
+  tab_header(title = "Videodaten")
+
+likes_views <- likes_views %>%
+  tab_options(table.width = pct(100), table.align = "center")
+
+likes_views
+```
+
+--
+
+&#8594; Nacherhebung von 20 weiteren bekannten weiblich gelesenen Accounts
+---
+
+class: inverse, center, middle
+
+# Themen
+
+---
+
+# Topic Models
+
+```{r preprocess, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+merged_small <- merged %>%
+  filter(user!="adnanomar56")
+merged_small$title[is.na(merged_small$title)] <- ""
+merged_small$text <- paste(merged_small$title, merged_small$description, sep = " ")
+merged_small$text <- gsub("#","", merged_small$text)
+
+# Preprocessing and collocation detection
+processed_corpus <- corpus(merged_small$text) %>%
+  corpus(docvars = as.data.frame(subset(merged_small, select = -c(text)))) %>%
+  tokens(remove_punct = TRUE,
+         remove_numbers = TRUE,
+         remove_url = TRUE,
+         split_hyphens = TRUE,
+         remove_symbols = TRUE) %>%
+  tokens_remove(pattern = c("[\\p{Arabic}]", "[\\p{Hangul}]")) %>%
+  tokens_remove(stopwords("de", source = "marimo")) %>%
+  tokens_tolower()
+
+
+# Collocation detection
+collocations <- textstat_collocations(processed_corpus, method = "lambda", size = 2)
+collocation_threshold <- 5  # Adjust the threshold as needed
+
+# Compound frequently co-occurring words
+processed_corpus <- processed_corpus %>%
+  tokens_compound(pattern = collocations$feature[collocations$count >= collocation_threshold])
+
+# Create dfm
+dfm_post <- processed_corpus %>%
+  dfm() %>%
+  dfm_remove(pattern = c("*.tt", "*.uk", "*.com", "@*", "*.de"))
+
+# Trim dfm for maximum and minimum term frequency
+dfm_post <- dfm_post %>%
+  dfm_trim(max_termfreq = 0.99, termfreq_type = "quantile", verbose = TRUE) %>%
+  dfm_trim(min_termfreq = 0.7, termfreq_type = "quantile", verbose = TRUE)
+
+# Remove empty
+dfm_new <- dfm_subset(dfm_post, ntoken(dfm_post) > 0)
+
+# Word stemming
+dfm_new <- dfm_new %>%
+  dfm_wordstem(language = "german")
+```
+
+```{r topic-models, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+dfm2stm <- convert(dfm_new, to = "stm")
+
+set.seed(1234)
+topic.count <- 14
+model.stm <- stm(dfm2stm$documents, dfm2stm$vocab, 
+                 K = topic.count, data = dfm2stm$meta, 
+                 init.type = "Spectral", verbose = FALSE)
+
+# labelTopics(model.stm, n=20)
+# Assign topic labels
+topic_labels <- c("Reminders", 
+                  "Community: Improvement", 
+                  "Promotion and Ads", 
+                  "Promotion and Ads", 
+                  "Promotion and Ads", 
+                  "Interfaith",
+                  "Everyday",
+                  "Dawah (Scene)", 
+                  "Interfaith", 
+                  "Stories", 
+                  "Motivation", 
+                  "Gender and Relationships", 
+                  "Charity", 
+                  "Community: Organizational")
+
+# Combine topics with the same label
+unique_labels <- unique(topic_labels)
+combined_topics <- lapply(unique_labels, function(label) which(topic_labels == label))
+combined_label <- unique_labels
+
+# Update topic labels
+for (i in seq_along(combined_topics)) {
+  model.stm$labels[combined_topics[[i]]] <- combined_label[i]
+}
+
+topic_proportions <- model.stm$theta
+```
+
+
+```{r distribution, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+topic_averages <- colMeans(topic_proportions)
+
+# Combine specific columns into one variable
+topic_graph <- data.frame(Average = topic_averages)
+topic_graph[3,] <- sum(topic_graph[3:5,])
+topic_graph[6,] <- sum(topic_graph[c(6,9),])
+topic_graph[2,] <- sum(topic_graph[c(2,14),])
+topic_graph <- data.frame(topic_graph[-c(4,5,9,14),])
+
+topic_graph$Label <- c("Reminders", 
+                  "Community", 
+                  "Promotion and Ads", 
+                  "Interfaith",
+                  "Everyday",
+                  "Dawah", 
+                  "Stories", 
+                  "Motivation", 
+                  "Gender and Relationships", 
+                  "Charity")
+names(topic_graph) <- c("Average","Label")
+
+
+ggplot(topic_graph, aes(x=reorder(Label, Average), y=Average, fill=Label)) +
+  geom_col() +
+  coord_flip() +
+  theme_minimal() +
+  labs(y="Themenanteil", x="Thema") +
+  theme(legend.position="none")
+```
+
+---
+
+# Themen und Konjunkturen?
+
+```{r by-time-1, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+topic_data <- bind_cols(dfm2stm[["meta"]],topic_proportions)
+colnames(topic_data)[20:33] <- c("topic_1",
+                                  "topic_2",
+                                  "topic_3",
+                                  "topic_4",
+                                  "topic_5",
+                                  "topic_6",
+                                  "topic_7",
+                                  "topic_8",
+                                  "topic_9",
+                                  "topic_10",
+                                  "topic_11",
+                                  "topic_12",
+                                  "topic_13",
+                                  "topic_14")
+
+topic_data$topic_3 <- topic_data$topic_3+topic_data$topic_4+topic_data$topic_5
+topic_data$topic_6 <- topic_data$topic_6+topic_data$topic_9
+topic_data$topic_2 <- topic_data$topic_2+topic_data$topic_14
+
+topic_data <- topic_data %>%
+  select(!c(topic_4,topic_5,topic_9,topic_14))
+
+colnames(topic_data)[20:29] <- c("Reminders", 
+                  "Community", 
+                  "Promotion and Ads", 
+                  "Interfaith",
+                  "Everyday",
+                  "Dawah", 
+                  "Stories", 
+                  "Motivation", 
+                  "Gender and Relationships", 
+                  "Charity")
+
+topic_long <- pivot_longer(topic_data, cols = Reminders:Charity)
+topic_long_test <- topic_long %>%
+  group_by(date,name) %>%
+  summarise(time_avg = mean(value))
+
+topic_long$months <- format(as.Date(topic_long$date), "%Y-%m")
+  
+topic_long_months <- topic_long %>%
+  group_by(months,name) %>%
+  summarise(time_avg = mean(value))
+
+topic_long_months$months <- ym(topic_long_months$months)
+
+# ggplot(topic_long_test, aes(x=date, y=time_avg, color=name)) +
+#   geom_point(alpha=0.4) +
+#   geom_line() +
+#   theme_minimal() +
+#   theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1)) +
+#   facet_wrap(vars(name))
+
+ggplot(topic_long_months, aes(x=months, y=time_avg, color=name)) +
+  geom_point(alpha=0.4) +
+  geom_line() +
+  theme_minimal() +
+  labs(x="Monate", y="Themenanteile") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(vars(name))
+```
+
+---
+
+# Themen nach Geschlecht
+
+```{r by-rad, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+# topic_long_list <- topic_long %>%
+#   group_by(list,name) %>%
+#   summarise(listen_durchschnitt = mean(value))
+# 
+# ggplotly(
+# ggplot(topic_long_list, aes(x=reorder(list, listen_durchschnitt), y=listen_durchschnitt, fill=name)) +
+#   geom_col(position="fill") +
+#   theme_minimal() +
+#   labs(y="Themenanteil", x="Thema")
+# )
+```
+
+
+```{r topics_genderc, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+topic_long <- topic_long %>%
+  mutate(gender = case_when(
+    user %in% female$account ~ "female",
+    TRUE ~ "male"
+  ))
+
+topic_long_gender <- topic_long %>%
+  group_by(gender,name) %>%
+  summarise(gender_avg = mean(value))
+
+gg_frau <- topic_long_gender %>%
+  filter(gender=="female") %>%
+  ggplot(., aes(x = reorder(name,gender_avg), y = gender_avg/max(gender_avg), fill = name)) +
+  geom_col() +
+  theme_minimal() +
+  labs(y="Themenanteil", x="Thema", title = "Frauen") +
+  theme(legend.position="none") +
+  coord_flip()
+
+gg_mann <- topic_long_gender %>%
+  filter(gender=="male") %>%
+  ggplot(., aes(x = reorder(name,gender_avg), y = gender_avg/max(gender_avg), fill = name)) +
+  geom_col() +
+  theme_minimal() +
+  labs(y="Themenanteil", x="Thema", title = "Männer") +
+  theme(legend.position="none") +
+  coord_flip()
+
+ggarrange(gg_frau, gg_mann, ncol = 2, nrow = 1)
+```
+
+---
+
+# Anti-Muslim Grievances?
+
+```{r griev, echo=FALSE, message=FALSE, warning=FALSE, dpi=300}
+grievance <- c("israel", "palest", "paläs", "jerusalem", "aqsa", "west bank",
+               "west-bank", "gaza", "aparth", "antisemit","uigur", "uyghur",
+               "hindut", "myanm", "rohing", "srebrenica", "bomb", "attack", 
+               "strike", "verteid", "resist", "defen", "widerstand", "battl",
+               "wehren", "abwehr", "oppos", "kopftuch verb", "scarf", "niqab",
+               "jilbab","hijab", "shador", "schador", "rassis", "race", "racis",
+               "discrim", "diskrim", "nazi", "phob")
+
+merged_small$grievance <- grepl(paste(grievance,collapse="|"), merged_small$text, ignore.case = TRUE)
+merged_small$date <- format(as.Date(merged_small$date), "%Y-%m")
+
+merged_grouped_1 <- merged_small %>%
+  group_by(date) %>%
+  summarise(sum_griev = round(sum(grievance)/length(grievance)*100))
+
+merged_grouped_1$gender <- "all"
+
+merged_grouped_2 <- merged_small %>%
+  group_by(date,gender) %>%
+  summarise(sum_griev = round(sum(grievance)/length(grievance)*100))
+
+all_grouped <- bind_rows(merged_grouped_1, merged_grouped_2)
+
+all_grouped$date <- ym(all_grouped$date)
+
+ggplot(all_grouped, aes(x=date, y=sum_griev, color=gender)) +
+  geom_point(aes(shape=gender), alpha=0.4) +
+  geom_line() +
+  theme_minimal() +
+  labs(x="Monate", y="% an Videos")
+```
+
+
+---
+
+class: inverse, center, middle
+
+# Ausblick
+
+---
+
+# Was ist zu tun?
+
+### 1. Inhaltliche Untersuchung von Content Creator
+
+#### Akteure
+#### Themen
+#### Einstellungen
+
+### 2. Erhebung von gelesenen Diversitätsmerkmalen<br>(Geschlecht, Ethnicity, Queer Identities)
+
+### 3. Konstruktion und Aushandlung dieser Identitäten<br>auf/durch TikTok
